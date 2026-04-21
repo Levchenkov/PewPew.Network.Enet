@@ -35,6 +35,9 @@ namespace PewPew.Network.Enet.Internal
         private readonly UdpSocket _socket = new();
         private bool _disposed;
 
+        // Object pool — eliminates per-packet allocations for command objects
+        public readonly ENetCommandPool Pool = new();
+
         // ── Peers ─────────────────────────────────────────────────────────────
         public ENetPeer[] Peers = Array.Empty<ENetPeer>();
         public int PeerCount;
@@ -109,11 +112,16 @@ namespace PewPew.Network.Enet.Internal
             RandomSeed = (uint)Environment.TickCount ^ (uint)(System.Threading.Thread.CurrentThread.ManagedThreadId << 16);
             Mtu = ProtocolConstants.HostDefaultMtu;
 
-            // Initialise peers
+            // Initialise peers — pre-allocate channels up to ChannelLimit so Connect()
+            // can reuse them via Reset() instead of allocating on every new connection.
             Peers = new ENetPeer[peerCount];
             for (int i = 0; i < peerCount; i++)
             {
-                Peers[i] = new ENetPeer { Host = this, IncomingPeerId = (ushort)i };
+                var peer = new ENetPeer { Host = this, IncomingPeerId = (ushort)i };
+                peer.Channels = new ENetChannel[ChannelLimit];
+                for (int c = 0; c < ChannelLimit; c++)
+                    peer.Channels[c] = new ENetChannel();
+                Peers[i] = peer;
             }
 
             // Create socket
@@ -162,9 +170,16 @@ namespace PewPew.Network.Enet.Internal
 
             if (currentPeer == null) return null;
 
-            currentPeer.Channels = new ENetChannel[channelCount];
+            // Reuse the pre-allocated channel array; just reset the channels we'll use.
+            // If the peer somehow lost its channel array (shouldn't happen), re-create it.
+            if (currentPeer.Channels == null || currentPeer.Channels.Length < channelCount)
+            {
+                currentPeer.Channels = new ENetChannel[Math.Max(channelCount, ChannelLimit)];
+                for (int i = 0; i < currentPeer.Channels.Length; i++)
+                    currentPeer.Channels[i] = new ENetChannel();
+            }
             for (int i = 0; i < channelCount; i++)
-                currentPeer.Channels[i] = new ENetChannel();
+                currentPeer.Channels[i].Reset();
             currentPeer.ChannelCount = channelCount;
             currentPeer.State = ENetPeerState.Connecting;
             currentPeer.Address = remoteAddress.ToEndPoint();
@@ -486,6 +501,7 @@ namespace PewPew.Network.Enet.Internal
                 peer.TotalWaitingData -= packet.DataLength;
             }
 
+            Pool.ReturnIncoming(cmd);
             return packet;
         }
 
@@ -912,11 +928,18 @@ namespace PewPew.Network.Enet.Internal
             if (channelCount > (uint)ChannelLimit)
                 channelCount = (uint)ChannelLimit;
 
-            peer.Channels = new ENetChannel[(int)channelCount];
-            for (int i = 0; i < (int)channelCount; i++)
-                peer.Channels[i] = new ENetChannel();
+            if (peer.Channels == null || peer.Channels.Length < (int)channelCount)
+            {
+                peer.Channels = new ENetChannel[(int)channelCount];
+                for (int i = 0; i < (int)channelCount; i++)
+                    peer.Channels[i] = new ENetChannel();
+            }
+            else
+            {
+                for (int i = 0; i < (int)channelCount; i++)
+                    peer.Channels[i].Reset();
+            }
             peer.ChannelCount = (int)channelCount;
-            peer.State = ENetPeerState.AcknowledgingConnect;
             peer.ConnectId = command.Connect.ConnectId;
             peer.Address = _receivedAddress;
             peer.OutgoingPeerId = command.Connect.OutgoingPeerId;
@@ -993,9 +1016,17 @@ namespace PewPew.Network.Enet.Internal
 
             if (channelCount < (uint)peer.ChannelCount)
             {
-                peer.Channels = new ENetChannel[(int)channelCount];
-                for (int i = 0; i < (int)channelCount; i++)
-                    peer.Channels[i] = new ENetChannel();
+                if (peer.Channels == null || peer.Channels.Length < (int)channelCount)
+                {
+                    peer.Channels = new ENetChannel[(int)channelCount];
+                    for (int i = 0; i < (int)channelCount; i++)
+                        peer.Channels[i] = new ENetChannel();
+                }
+                else
+                {
+                    for (int i = 0; i < (int)channelCount; i++)
+                        peer.Channels[i].Reset();
+                }
                 peer.ChannelCount = (int)channelCount;
             }
 
@@ -1301,6 +1332,7 @@ namespace PewPew.Network.Enet.Internal
 
                 ackCmd.Write(sendBuffer.AsSpan(offset));
                 offset += 8;
+                Pool.ReturnAck(ack);
             }
 
             FlushBuffer(peer, sendBuffer, offset);
@@ -1467,6 +1499,8 @@ namespace PewPew.Network.Enet.Internal
                         cmd.Packet.Destroy();
                     }
                 }
+
+                Pool.ReturnOutgoing(cmd);
             }
 
             if (peer.State == ENetPeerState.DisconnectLater &&
@@ -1782,6 +1816,8 @@ namespace PewPew.Network.Enet.Internal
                     found.Packet.Destroy();
                 }
             }
+
+            Pool.ReturnOutgoing(found);
 
             if (!peer.SentReliableCommands.IsEmpty)
             {

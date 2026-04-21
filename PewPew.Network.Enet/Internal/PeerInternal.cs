@@ -127,7 +127,19 @@ namespace PewPew.Network.Enet.Internal
             IncomingSessionId = 0xFF;
             Address = null;
             UserData = null;
-            Channels = null;
+
+            // Drain channel incoming-command lists back to pool; keep the channel array
+            // allocated so the next Connect() can reuse it without re-allocating.
+            if (Channels != null && Host != null)
+            {
+                var pool = Host.Pool;
+                for (int i = 0; i < ChannelCount; i++)
+                {
+                    ReturnIncomingListToPool(Channels[i].IncomingReliableCommands, pool);
+                    ReturnIncomingListToPool(Channels[i].IncomingUnreliableCommands, pool);
+                }
+            }
+            // Do NOT null out Channels — keep the pre-allocated array for next connection
             ChannelCount = 0;
             IncomingBandwidth = 0;
             OutgoingBandwidth = 0;
@@ -184,11 +196,39 @@ namespace PewPew.Network.Enet.Internal
                 NeedsDispatch = false;
             }
 
+            if (Host != null)
+            {
+                var pool = Host.Pool;
+                ReturnListToPool(Acknowledgements, pool);
+                ReturnOutgoingListToPool(SentReliableCommands, pool);
+                ReturnOutgoingListToPool(SentUnreliableCommands, pool);
+                ReturnOutgoingListToPool(OutgoingCommands, pool);
+                ReturnIncomingListToPool(DispatchedCommands, pool);
+            }
+
             Acknowledgements.Clear();
             SentReliableCommands.Clear();
             SentUnreliableCommands.Clear();
             OutgoingCommands.Clear();
             DispatchedCommands.Clear();
+        }
+
+        private static void ReturnListToPool(ENetList<ENetAcknowledgement> list, ENetCommandPool pool)
+        {
+            for (var n = list.Begin; n != list.End; n = n.Next!)
+                if (n.Owner != null) pool.ReturnAck(n.Owner);
+        }
+
+        private static void ReturnOutgoingListToPool(ENetList<ENetOutgoingCommand> list, ENetCommandPool pool)
+        {
+            for (var n = list.Begin; n != list.End; n = n.Next!)
+                if (n.Owner != null) pool.ReturnOutgoing(n.Owner);
+        }
+
+        private static void ReturnIncomingListToPool(ENetList<ENetIncomingCommand> list, ENetCommandPool pool)
+        {
+            for (var n = list.Begin; n != list.End; n = n.Next!)
+                if (n.Owner != null) pool.ReturnIncoming(n.Owner);
         }
 
         public void OnConnect()
@@ -280,13 +320,11 @@ namespace PewPew.Network.Enet.Internal
             if (cmd == (byte)ENetProtocolCommand.None)
                 return null;
 
-            var outgoing = new ENetOutgoingCommand
-            {
-                Command = command,
-                FragmentOffset = offset,
-                FragmentLength = length,
-                Packet = packet
-            };
+            var outgoing = Host!.Pool.GetOutgoing();
+            outgoing.Command = command;
+            outgoing.FragmentOffset = offset;
+            outgoing.FragmentLength = length;
+            outgoing.Packet = packet;
 
             byte channelId = command.Header.ChannelId;
             if (channelId < ChannelCount && Channels != null)
@@ -349,11 +387,9 @@ namespace PewPew.Network.Enet.Internal
                     return null;
             }
 
-            var ack = new ENetAcknowledgement
-            {
-                SentTime = sentTime,
-                Command = command
-            };
+            var ack = Host!.Pool.GetAck();
+            ack.SentTime = sentTime;
+            ack.Command = command;
 
             OutgoingDataTotal += (uint)CommandSizes.GetCommandSize((byte)ENetProtocolCommand.Acknowledge);
             Acknowledgements.Insert(Acknowledgements.End, ack.ListNode);
@@ -455,15 +491,13 @@ namespace PewPew.Network.Enet.Internal
             if (fragmentCount > 0 || (data != null && dataLength > 0))
                 pkt = ENetPacket.Create(data, dataLength, flags);
 
-            incomingCommand = new ENetIncomingCommand
-            {
-                ReliableSequenceNumber = command.Header.ReliableSequenceNumber,
-                UnreliableSequenceNumber = (ushort)(unreliableSequenceNumber & 0xFFFF),
-                Command = command,
-                FragmentCount = fragmentCount,
-                FragmentsRemaining = fragmentCount,
-                Packet = pkt
-            };
+            incomingCommand = Host!.Pool.GetIncoming();
+            incomingCommand.ReliableSequenceNumber = command.Header.ReliableSequenceNumber;
+            incomingCommand.UnreliableSequenceNumber = (ushort)(unreliableSequenceNumber & 0xFFFF);
+            incomingCommand.Command = command;
+            incomingCommand.FragmentCount = fragmentCount;
+            incomingCommand.FragmentsRemaining = fragmentCount;
+            incomingCommand.Packet = pkt;
 
             if (fragmentCount > 0)
             {
@@ -564,6 +598,8 @@ namespace PewPew.Network.Enet.Internal
 
                 if (incoming.Packet != null)
                     DispatchedCommands.Insert(DispatchedCommands.End, incoming.ListNode);
+                else
+                    Host?.Pool.ReturnIncoming(incoming);
             }
 
             if (!NeedsDispatch && Host != null)
@@ -611,6 +647,8 @@ namespace PewPew.Network.Enet.Internal
 
                 if (incoming.Packet != null)
                     DispatchedCommands.Insert(DispatchedCommands.End, incoming.ListNode);
+                else
+                    Host?.Pool.ReturnIncoming(incoming);
                 droppedCommand = incoming.ListNode;
             }
 

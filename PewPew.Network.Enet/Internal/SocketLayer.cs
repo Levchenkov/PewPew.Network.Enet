@@ -12,6 +12,8 @@ namespace PewPew.Network.Enet.Internal
     {
         private Socket? _socket;
         private bool _disposed;
+        // Reused across ReceiveFrom calls to avoid allocating a new IPEndPoint per datagram
+        private IPEndPoint _receiveEndPoint = new IPEndPoint(IPAddress.IPv6Any, 0);
 
         public bool IsValid => _socket != null && !_disposed;
 
@@ -103,9 +105,14 @@ namespace PewPew.Network.Enet.Internal
 
             try
             {
-                EndPoint ep = new IPEndPoint(IPAddress.IPv6Any, 0);
+                // Pass the reused endpoint; .NET only allocates a new IPEndPoint if the
+                // sender address differs from the previous call, so consecutive packets
+                // from the same peer incur zero allocations.
+                EndPoint ep = _receiveEndPoint;
                 int received = _socket.ReceiveFrom(buffer, offset, length, SocketFlags.None, ref ep);
-                remote = (IPEndPoint)ep;
+                // Update the cached reference (no-op if address unchanged)
+                _receiveEndPoint = (IPEndPoint)ep;
+                remote = _receiveEndPoint;
                 return received;
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.WouldBlock ||
