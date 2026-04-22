@@ -32,7 +32,17 @@ namespace PewPew.Network.Enet.Internal
 
     internal class ENetHostInternal : IDisposable
     {
-        private readonly UdpSocket _socket = new();
+        private readonly IUdpSocket _socket;
+
+        internal ENetHostInternal()
+        {
+            _socket = new UdpSocket();
+        }
+
+        internal ENetHostInternal(IUdpSocket socket)
+        {
+            _socket = socket;
+        }
         private bool _disposed;
 
         // Object pool — eliminates per-packet allocations for command objects
@@ -697,7 +707,7 @@ namespace PewPew.Network.Enet.Internal
                     return 0;
                 }
                 if (peer.State != ENetPeerState.Connecting &&
-                    sessionId != ((peer.IncomingSessionId - 1) & 3))
+                    sessionId != peer.IncomingSessionId)
                     return 0;
             }
 
@@ -787,12 +797,20 @@ namespace PewPew.Network.Enet.Internal
 
                 case ENetProtocolCommand.VerifyConnect:
                     if (peer != null)
+                    {
+                        // ACK must be queued before the early return so the server
+                        // receives it and can transition out of AcknowledgingConnect.
+                        if (needsAck) peer.QueueAcknowledgement(ref command, sentTime);
                         return HandleVerifyConnect(evt, peer, ref command);
+                    }
                     break;
 
                 case ENetProtocolCommand.Disconnect:
                     if (peer != null)
+                    {
+                        if (needsAck) peer.QueueAcknowledgement(ref command, sentTime);
                         return HandleDisconnect(evt, peer, ref command);
+                    }
                     break;
 
                 case ENetProtocolCommand.Ping:
@@ -897,6 +915,7 @@ namespace PewPew.Network.Enet.Internal
 
         private ENetPeer? HandleConnect(ref ENetProtocol command)
         {
+            if (PreventConnections) return null;
             if (_receivedAddress == null) return null;
 
             uint channelCount = command.Connect.ChannelCount;
@@ -996,6 +1015,7 @@ namespace PewPew.Network.Enet.Internal
             verifyCmd.VerifyConnect.ConnectId = peer.ConnectId;
 
             peer.QueueOutgoingCommand(ref verifyCmd, null, 0, 0);
+            peer.State = ENetPeerState.AcknowledgingConnect;
             return peer;
         }
 
@@ -1092,9 +1112,15 @@ namespace PewPew.Network.Enet.Internal
             int dataLen = command.SendReliable.DataLength;
             if (dataLen > payloadData.Length) return;
 
+            byte channelId = command.Header.ChannelId;
+            if (channelId >= peer.ChannelCount || peer.Channels == null) return;
+            var channel = peer.Channels[channelId];
+
             byte[] data = payloadData.Slice(0, dataLen).ToArray();
-            peer.QueueIncomingCommand(ref command, data, dataLen,
+            var incoming = peer.QueueIncomingCommand(ref command, data, dataLen,
                 ENetPacketFlag.Reliable, 0);
+            if (incoming != null)
+                peer.DispatchIncomingReliableCommands(channel, incoming);
         }
 
         private void HandleSendUnreliable(ENetPeer peer, ref ENetProtocol command, ReadOnlySpan<byte> payloadData)
@@ -1102,8 +1128,14 @@ namespace PewPew.Network.Enet.Internal
             int dataLen = command.SendUnreliable.DataLength;
             if (dataLen > payloadData.Length) return;
 
+            byte channelId = command.Header.ChannelId;
+            if (channelId >= peer.ChannelCount || peer.Channels == null) return;
+            var channel = peer.Channels[channelId];
+
             byte[] data = payloadData.Slice(0, dataLen).ToArray();
-            peer.QueueIncomingCommand(ref command, data, dataLen, ENetPacketFlag.None, 0);
+            var incoming = peer.QueueIncomingCommand(ref command, data, dataLen, ENetPacketFlag.None, 0);
+            if (incoming != null)
+                peer.DispatchIncomingUnreliableCommands(channel, incoming);
         }
 
         private void HandleSendUnsequenced(ENetPeer peer, ref ENetProtocol command, ReadOnlySpan<byte> payloadData)
@@ -1279,12 +1311,8 @@ namespace PewPew.Network.Enet.Internal
                     }
                 }
 
-                if ((peer.OutgoingCommands.IsEmpty && peer.SentReliableCommands.IsEmpty) ||
-                    ContinueSendingReliable(peer, sendBuffer))
-                {
-                    // Send any unreliable commands
-                    SendUnreliableCommands(peer, sendBuffer);
-                }
+                ContinueSendingReliable(peer, sendBuffer);
+                SendUnreliableCommands(peer, sendBuffer);
 
                 // Check ping interval
                 if (peer.State == ENetPeerState.Connected &&
@@ -1334,6 +1362,12 @@ namespace PewPew.Network.Enet.Internal
 
                 ackCmd.Write(sendBuffer.AsSpan(offset));
                 offset += 8;
+
+                // Mirror C ENet: transition AcknowledgingDisconnect → Zombie after ACK for DISCONNECT is sent.
+                if (peer.State == ENetPeerState.AcknowledgingDisconnect &&
+                    (ack.Command.Header.Command & (byte)ENetProtocolCommand.Mask) == (byte)ENetProtocolCommand.Disconnect)
+                    DispatchState(peer, ENetPeerState.Zombie);
+
                 Pool.ReturnAck(ack);
             }
 

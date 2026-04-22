@@ -41,7 +41,11 @@ namespace PewPew.Network.Enet
             }
         }
 
-        public void Create(byte[] data) => Create(data, data.Length, PacketFlags.None);
+        public void Create(byte[] data)
+        {
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            Create(data, data.Length, PacketFlags.None);
+        }
 
         public void Create(byte[] data, PacketFlags flags) => Create(data, data.Length, flags);
 

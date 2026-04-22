@@ -8,7 +8,7 @@ namespace PewPew.Network.Enet.Internal
     /// UDP socket abstraction. Uses IPv6 dual-stack to support both IPv4 and IPv6,
     /// matching the C ENet behaviour with in6_addr.
     /// </summary>
-    internal sealed class UdpSocket : IDisposable
+    internal sealed class UdpSocket : IUdpSocket
     {
         private Socket? _socket;
         private bool _disposed;
