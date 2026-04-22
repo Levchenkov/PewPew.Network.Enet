@@ -1,5 +1,6 @@
-using System.Text;
-using PewPew.Network.Enet;
+﻿using System.Text;
+using ENet;
+
 
 Library.Initialize();
 
@@ -40,9 +41,7 @@ void CreateAndSend(int index)
             {
                 Packet packet = default(Packet);
 
-                // packet.Create(data, data.Length, PacketFlags.Reliable);
-                // packet.Create(data, data.Length, PacketFlags.Unsequenced | PacketFlags.NoAllocate | PacketFlags.Instant);
-                packet.Create(data, data.Length, PacketFlags.Unsequenced | PacketFlags.NoAllocate);
+                packet.Create(data, data.Length, PacketFlags.Reliable);
                 peer.Send(1, ref packet);
                 sendTime = DateTime.Now + TimeSpan.FromMilliseconds(1000);
             }

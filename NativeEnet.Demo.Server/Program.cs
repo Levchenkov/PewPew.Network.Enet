@@ -1,4 +1,4 @@
-using PewPew.Network.Enet;
+﻿using ENet;
 
 Library.Initialize();
 
@@ -50,9 +50,7 @@ using (Host server = new Host()) {
                     Packet packet = default(Packet);
                     byte[] data = buffer;
 
-                    // packet.Create(data, packetLength, PacketFlags.Reliable);
-                    // packet.Create(data, packetLength, PacketFlags.Unsequenced | PacketFlags.NoAllocate | PacketFlags.Instant);
-                    packet.Create(data, packetLength, PacketFlags.Unsequenced | PacketFlags.NoAllocate);
+                    packet.Create(data, packetLength, PacketFlags.Reliable);
                     netEvent.Peer.Send(2, ref packet);
                     break;
             }
