@@ -62,7 +62,7 @@ while (running)
                 var reply = new Packet();
                 reply.Create(buf, len, PacketFlags.Reliable);
                 var peer = evt.Peer;
-                peer.Send(evt.ChannelID, ref reply);
+                peer.Send(1, ref reply);
 
                 pkt.Dispose();
                 break;
