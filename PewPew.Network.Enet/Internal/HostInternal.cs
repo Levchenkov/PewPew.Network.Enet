@@ -869,21 +869,23 @@ namespace PewPew.Network.Enet.Internal
             peer.LastReceiveTime = ServiceTime;
             peer.EarliestTimeout = 0;
 
-            RemoveSentReliableCommand(peer, ackSeq, command.Acknowledge.Header.ChannelId);
+            // commandNumber is the type of the SENT command that was just acknowledged,
+            // not the type of the incoming ACK packet itself (mirrors C return value of
+            // enet_protocol_remove_sent_reliable_command).
+            var commandNumber = RemoveSentReliableCommand(peer, ackSeq, command.Acknowledge.Header.ChannelId);
 
             switch (peer.State)
             {
                 case ENetPeerState.AcknowledgingConnect:
-                    // Handled via VerifyConnect flow
+                    if (commandNumber == ENetProtocolCommand.VerifyConnect)
+                        NotifyConnect(peer, null);
                     break;
                 case ENetPeerState.Disconnecting:
-                    if ((ENetProtocolCommand)(command.Acknowledge.Header.Command & (byte)ENetProtocolCommand.Mask) ==
-                        ENetProtocolCommand.Disconnect)
+                    if (commandNumber == ENetProtocolCommand.Disconnect)
                         DispatchState(peer, ENetPeerState.Zombie);
                     break;
                 case ENetPeerState.AcknowledgingDisconnect:
-                    if ((ENetProtocolCommand)(command.Acknowledge.Header.Command & (byte)ENetProtocolCommand.Mask) ==
-                        ENetProtocolCommand.Disconnect)
+                    if (commandNumber == ENetProtocolCommand.Disconnect)
                         peer.Reset();
                     break;
                 case ENetPeerState.DisconnectLater:
@@ -1537,31 +1539,46 @@ namespace PewPew.Network.Enet.Internal
 
         private void WriteCommand(ref ENetProtocol cmd, Span<byte> buf)
         {
+            // Unlike the C union where cmd.header and cmd.connect.header alias the same
+            // memory, in C# they are separate fields.  Propagate the canonical top-level
+            // Header into whichever sub-struct will be serialised so that the wire bytes
+            // (command byte, channelID, reliableSequenceNumber) are correct.
             var cmdType = (ENetProtocolCommand)(cmd.Header.Command & (byte)ENetProtocolCommand.Mask);
             switch (cmdType)
             {
                 case ENetProtocolCommand.Acknowledge:
+                    cmd.Acknowledge.Header = cmd.Header;
                     cmd.Acknowledge.Write(buf); break;
                 case ENetProtocolCommand.Connect:
+                    cmd.Connect.Header = cmd.Header;
                     cmd.Connect.Write(buf); break;
                 case ENetProtocolCommand.VerifyConnect:
+                    cmd.VerifyConnect.Header = cmd.Header;
                     cmd.VerifyConnect.Write(buf); break;
                 case ENetProtocolCommand.Disconnect:
+                    cmd.Disconnect.Header = cmd.Header;
                     cmd.Disconnect.Write(buf); break;
                 case ENetProtocolCommand.Ping:
+                    cmd.Ping.Header = cmd.Header;
                     cmd.Ping.Write(buf); break;
                 case ENetProtocolCommand.SendReliable:
+                    cmd.SendReliable.Header = cmd.Header;
                     cmd.SendReliable.Write(buf); break;
                 case ENetProtocolCommand.SendUnreliable:
+                    cmd.SendUnreliable.Header = cmd.Header;
                     cmd.SendUnreliable.Write(buf); break;
                 case ENetProtocolCommand.SendUnsequenced:
+                    cmd.SendUnsequenced.Header = cmd.Header;
                     cmd.SendUnsequenced.Write(buf); break;
                 case ENetProtocolCommand.SendFragment:
                 case ENetProtocolCommand.SendUnreliableFragment:
+                    cmd.SendFragment.Header = cmd.Header;
                     cmd.SendFragment.Write(buf); break;
                 case ENetProtocolCommand.BandwidthLimit:
+                    cmd.BandwidthLimit.Header = cmd.Header;
                     cmd.BandwidthLimit.Write(buf); break;
                 case ENetProtocolCommand.ThrottleConfigure:
+                    cmd.ThrottleConfigure.Header = cmd.Header;
                     cmd.ThrottleConfigure.Write(buf); break;
                 default:
                     cmd.Header.Write(buf); break;
@@ -1750,7 +1767,11 @@ namespace PewPew.Network.Enet.Internal
         // Helpers
         // ─────────────────────────────────────────────────────────────────────
 
-        private void RemoveSentReliableCommand(ENetPeer peer, ushort reliableSeq, byte channelId)
+        // Returns the command type of the removed sent reliable command (mirrors
+        // enet_protocol_remove_sent_reliable_command return value), so that callers
+        // can detect which command was just acknowledged without inspecting the
+        // incoming ACK packet's own command byte.
+        private ENetProtocolCommand RemoveSentReliableCommand(ENetPeer peer, ushort reliableSeq, byte channelId)
         {
             ENetOutgoingCommand? found = null;
             var node = peer.SentReliableCommands.Begin;
@@ -1773,7 +1794,7 @@ namespace PewPew.Network.Enet.Internal
                 while (node != peer.OutgoingCommands.End)
                 {
                     var cmd = node.Owner!;
-                    if (cmd.SendAttempts < 1) return;
+                    if (cmd.SendAttempts < 1) return ENetProtocolCommand.None;
                     if (cmd.ReliableSequenceNumber == reliableSeq &&
                         cmd.Command.Header.ChannelId == channelId)
                     {
@@ -1782,13 +1803,16 @@ namespace PewPew.Network.Enet.Internal
                     }
                     node = node.Next!;
                 }
-                if (found == null) return;
+                if (found == null) return ENetProtocolCommand.None;
                 peer.OutgoingCommands.Remove(found.ListNode);
             }
             else
             {
                 peer.SentReliableCommands.Remove(found.ListNode);
             }
+
+            // Extract the command type of the removed sent command before freeing it.
+            var commandNumber = (ENetProtocolCommand)(found.Command.Header.Command & (byte)ENetProtocolCommand.Mask);
 
             // Update channel window
             if (channelId < peer.ChannelCount && peer.Channels != null)
@@ -1824,6 +1848,8 @@ namespace PewPew.Network.Enet.Internal
                 var first = peer.SentReliableCommands.Front!;
                 peer.NextTimeout = first.SentTime + first.RoundTripTimeout;
             }
+
+            return commandNumber;
         }
 
         private static bool AddressesEqual(IPEndPoint a, IPEndPoint b)
