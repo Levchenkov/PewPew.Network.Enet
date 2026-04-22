@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "glider": {
+      "type": "stdio",
+      "command": "glider",
+      "args": []
+    }
+  }
+}
