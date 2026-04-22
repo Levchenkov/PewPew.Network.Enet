@@ -330,7 +330,7 @@ namespace PewPew.Network.Enet.Tests
                 byte[] echoData = new byte[serverEvent.Packet.DataLength];
                 Array.Copy(serverEvent.Packet.Data, echoData, echoData.Length);
                 var echoPkt = ENetPacket.Create(echoData, echoData.Length, ENetPacketFlag.Reliable);
-                server.PeerSend(serverPeerForClient, (byte)serverEvent.ChannelId, echoPkt);
+                server.PeerSend(serverPeerForClient, 1, echoPkt);
 
                 // Reset and wait for client to receive the echo
                 serverEvent.Type = ENetEventType.None;

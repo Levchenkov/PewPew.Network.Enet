@@ -1,141 +1,85 @@
-using System;
 using System.Text;
-using System.Threading;
 using PewPew.Network.Enet;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PewPew.Network.Enet — Demo Client
-//
-// Connects to 127.0.0.1:7777, sends "Hello #N" every second (5 times),
-// prints each echo reply with peer RTT, then disconnects.
-// Make sure PewPew.Network.Enet.Demo.Server is running first.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const string Server_IP   = "127.0.0.1";
-const ushort Server_Port = 7777;
-const int    Channels    = 2;
-const int    MessageCount = 5;
-const int    ServiceTimeoutMs = 15;
-
-Console.Title = "ENet Demo — Client";
-Console.WriteLine("=== ENet Demo Client ===");
-Console.WriteLine($"Connecting to {Server_IP}:{Server_Port}");
-Console.WriteLine();
 
 Library.Initialize();
 
-var serverAddress = new Address();
-serverAddress.SetIP(Server_IP);
-serverAddress.Port = Server_Port;
-
-using var host = new Host();
-host.Create(null, 1, Channels);   // outgoing client, no bind address
-
-Peer server = host.Connect(serverAddress, Channels);
-
-// ── Wait for connection ───────────────────────────────────────────────────────
-Console.Write("[Client] Waiting for connection...");
-
-bool connected = false;
-var connectDeadline = Environment.TickCount64 + 3_000;
-
-while (Environment.TickCount64 < connectDeadline)
+for (int i = 0; i < 1000; i++)
 {
-    if (host.Service(ServiceTimeoutMs, out Event evt) > 0 && evt.Type == EventType.Connect)
-    {
-        connected = true;
-        break;
-    }
+    Thread.Sleep(100);
+    var l = i;
+    Task.Factory.StartNew(() => CreateAndSend(l), TaskCreationOptions.LongRunning);
+    // Task.Run(() => CreateAndSend(l));
 }
 
-if (!connected)
+while (!Console.KeyAvailable)
 {
-    Console.WriteLine(" TIMEOUT. Is the server running?");
-    Library.Deinitialize();
-    return;
+    Thread.Sleep(1000);
 }
 
-Console.WriteLine(" Connected!");
-Console.WriteLine();
-
-// ── Send messages and receive echoes ─────────────────────────────────────────
-int echosReceived = 0;
-
-for (int i = 1; i <= MessageCount; i++)
-{
-    string text = $"Hello #{i}";
-    byte[] data = Encoding.UTF8.GetBytes(text);
-
-    var pkt = new Packet();
-    pkt.Create(data, data.Length, PacketFlags.Reliable);
-    server.Send(0, ref pkt);
-
-    Console.WriteLine($"[Client] Sent: \"{text}\"");
-
-    // Wait up to 2s for the echo
-    var echoDeadline = Environment.TickCount64 + 2_000;
-    bool gotEcho = false;
-
-    while (Environment.TickCount64 < echoDeadline && !gotEcho)
-    {
-        while (host.Service(ServiceTimeoutMs, out Event evt) > 0)
-        {
-            if (evt.Type == EventType.Receive)
-            {
-                var p = evt.Packet;
-                int len = p.Length;
-                byte[] buf = new byte[len];
-                p.CopyTo(buf);
-                string reply = Encoding.UTF8.GetString(buf, 0, len);
-                p.Dispose();
-
-                Console.WriteLine($"[Client] Echo:  \"{reply}\"  (RTT={server.RoundTripTime}ms)");
-                echosReceived++;
-                gotEcho = true;
-            }
-            else if (evt.Type is EventType.Disconnect or EventType.Timeout)
-            {
-                Console.WriteLine("[Client] Disconnected by server.");
-                goto done;
-            }
-        }
-    }
-
-    if (!gotEcho)
-        Console.WriteLine($"[Client] No echo for message #{i} within timeout.");
-
-    // Pause 1 second between messages (pump service while waiting)
-    if (i < MessageCount)
-    {
-        var pauseEnd = Environment.TickCount64 + 1_000;
-        while (Environment.TickCount64 < pauseEnd)
-        {
-            host.Service(ServiceTimeoutMs, out _);
-        }
-    }
-}
-
-done:
-Console.WriteLine();
-Console.WriteLine($"[Client] Sent {MessageCount} messages, received {echosReceived} echoes.");
-Console.WriteLine("[Client] Disconnecting...");
-
-server.DisconnectLater(0);
-
-// Drain until disconnected or timeout
-var disconnectDeadline = Environment.TickCount64 + 3_000;
-while (Environment.TickCount64 < disconnectDeadline)
-{
-    if (host.Service(ServiceTimeoutMs, out Event evt) > 0)
-    {
-        if (evt.Type is EventType.Disconnect or EventType.Timeout)
-        {
-            Console.WriteLine("[Client] Disconnected cleanly.");
-            break;
-        }
-    }
-}
-
-host.Flush();
 Library.Deinitialize();
-Console.WriteLine("[Client] Done.");
+
+void CreateAndSend(int index)
+{
+    using (Host client = new Host()) {
+        Address address = new Address();
+
+        address.SetHost("127.0.0.1");
+        address.Port = 44556;
+        client.Create();
+
+        Peer peer = client.Connect(address, 4);
+        var sendTime = DateTime.Now + TimeSpan.FromMilliseconds(1000);
+
+        var data = Enumerable.Range(0, 500).Select(x => (byte)x).ToArray();
+
+        Event netEvent;
+
+        do {
+
+            if(sendTime - DateTime.Now < TimeSpan.Zero)
+            {
+                Packet packet = default(Packet);
+
+                packet.Create(data, data.Length, PacketFlags.Reliable);
+                peer.Send(1, ref packet);
+                sendTime = DateTime.Now + TimeSpan.FromMilliseconds(1000);
+            }
+
+            bool polled = false;
+
+            while (!polled) {
+                if (client.CheckEvents(out netEvent) <= 0) {
+                    if (client.Service(15, out netEvent) <= 0)
+                        break;
+
+                    polled = true;
+                }
+
+                switch (netEvent.Type) {
+                    case EventType.None:
+                        break;
+
+                    case EventType.Connect:
+                        // Console.WriteLine("Client connected to server");
+                        Console.WriteLine($"Client connected - ID: {index}, IP: {netEvent.Peer.IP}");
+                        break;
+
+                    case EventType.Disconnect:
+                        Console.WriteLine("Client disconnected from server");
+                        break;
+
+                    case EventType.Timeout:
+                        Console.WriteLine("Client connection timeout");
+                        break;
+
+                    case EventType.Receive:
+                        // Console.WriteLine($"Packet received from server - Channel ID: {netEvent.ChannelID}, Data length: {netEvent.Packet.Length}");
+                        netEvent.Packet.Dispose();
+                        break;
+                }
+            }
+        } while (true);
+
+        client.Flush();
+    }
+}

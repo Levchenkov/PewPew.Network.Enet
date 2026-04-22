@@ -1,82 +1,62 @@
-using System;
-using System.Text;
 using PewPew.Network.Enet;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PewPew.Network.Enet — Demo Server
-//
-// Listens on 127.0.0.1:7777, echoes every received packet back to the sender.
-// Run this first, then start PewPew.Network.Enet.Demo.Client.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const string Host_IP   = "127.0.0.1";
-const ushort Host_Port = 7777;
-const int    MaxPeers  = 32;
-const int    Channels  = 2;
-const int    ServiceTimeoutMs = 15;
-
-Console.Title = "ENet Demo — Server";
-Console.WriteLine("=== ENet Demo Server ===");
-Console.WriteLine($"Binding to {Host_IP}:{Host_Port}  (Ctrl+C to quit)");
-Console.WriteLine();
 
 Library.Initialize();
 
-bool running = true;
-Console.CancelKeyPress += (_, e) =>
-{
-    e.Cancel = true;
-    running = false;
-};
+using (Host server = new Host()) {
+    Address address = new Address();
 
-var address = new Address();
-address.SetIP(Host_IP);
-address.Port = Host_Port;
+    address.Port = 44556;
+    server.Create(address, 1000, 4);
 
-using var host = new Host();
-host.Create(address, MaxPeers, Channels);
+    var buffer = new byte[5000];
 
-Console.WriteLine($"[Server] Listening...");
+    Event netEvent;
 
-while (running)
-{
-    while (host.Service(ServiceTimeoutMs, out Event evt) > 0)
-    {
-        switch (evt.Type)
-        {
-            case EventType.Connect:
-                Console.WriteLine($"[Server] Client connected  — {evt.Peer.IP}:{evt.Peer.Port}  (id={evt.Peer.ID})");
-                break;
+    while (!Console.KeyAvailable) {
+        bool polled = false;
 
-            case EventType.Receive:
-            {
-                var pkt = evt.Packet;
-                int len = pkt.Length;
-                byte[] buf = new byte[len];
-                pkt.CopyTo(buf);
-                string msg = Encoding.UTF8.GetString(buf, 0, len);
+        while (!polled) {
+            if (server.CheckEvents(out netEvent) <= 0) {
+                if (server.Service(15, out netEvent) <= 0)
+                    break;
 
-                Console.WriteLine($"[Server] Received ch={evt.ChannelID}  \"{msg}\"  from peer {evt.Peer.ID}");
-
-                // Echo the message back
-                var reply = new Packet();
-                reply.Create(buf, len, PacketFlags.Reliable);
-                var peer = evt.Peer;
-                peer.Send(1, ref reply);
-
-                pkt.Dispose();
-                break;
+                polled = true;
             }
 
-            case EventType.Disconnect:
-            case EventType.Timeout:
-                Console.WriteLine($"[Server] Client disconnected — peer {evt.Peer.ID}  (type={evt.Type})");
-                break;
+            switch (netEvent.Type) {
+                case EventType.None:
+                    break;
+
+                case EventType.Connect:
+                    Console.WriteLine($"Client connected - ID: {netEvent.Peer.ID}, IP: {netEvent.Peer.IP}");
+                    break;
+
+                case EventType.Disconnect:
+                    Console.WriteLine($"Client disconnected - ID: {netEvent.Peer.ID}, IP: {netEvent.Peer.IP}");
+                    break;
+
+                case EventType.Timeout:
+                    Console.WriteLine($"Client timeout - ID: {netEvent.Peer.ID}, IP: {netEvent.Peer.IP}");
+                    break;
+
+                case EventType.Receive:
+                    // Console.WriteLine($"Packet received from peer ID: {netEvent.Peer.ID}, IP: {netEvent.Peer.IP}, Channel ID: {netEvent.ChannelID}, Data length: {netEvent.Packet.Length}");
+
+                    var packetLength = netEvent.Packet.Length;
+
+                    netEvent.Packet.CopyTo(buffer);
+                    netEvent.Packet.Dispose();
+
+                    Packet packet = default(Packet);
+                    byte[] data = buffer;
+
+                    packet.Create(data, packetLength, PacketFlags.Reliable);
+                    netEvent.Peer.Send(2, ref packet);
+                    break;
+            }
         }
     }
-}
 
-Console.WriteLine("[Server] Shutting down...");
-host.Flush();
+    server.Flush();
+}
 Library.Deinitialize();
-Console.WriteLine("[Server] Done.");
