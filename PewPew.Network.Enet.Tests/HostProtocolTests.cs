@@ -1,3 +1,5 @@
+using System;
+using System.Text;
 using System.Net;
 using Xunit;
 using PewPew.Network.Enet.Internal;
@@ -275,6 +277,91 @@ namespace PewPew.Network.Enet.Tests
                 (c, s) => s.Type == ENetEventType.Receive);
 
             Assert.True(client.PacketsSent > packetsBefore);
+        }
+
+        // ── Echo server ───────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Mirrors the Demo.Server / Demo.Client flow:
+        ///   client connects → sends N "Hello #i" messages →
+        ///   server echoes each back → client verifies every echo →
+        ///   client disconnects → server receives Disconnect event.
+        /// </summary>
+        [Fact]
+        public void EchoServer_ClientSendsMessages_ReceivesAllEchoes()
+        {
+            const int MessageCount = 5;
+
+            var (server, client, serverAddr) = CreateConnectedPair();
+            var clientPeer = client.Connect(serverAddr, 2, 0);
+
+            var serverEvent = new ENetEvent();
+            var clientEvent = new ENetEvent();
+
+            // ── Handshake ──────────────────────────────────────────────────────
+            bool connected = RunServiceLoop(client, clientEvent, server, serverEvent,
+                (c, s) => c.Type == ENetEventType.Connect && s.Type == ENetEventType.Connect);
+
+            Assert.True(connected, "Handshake did not complete");
+            var serverPeerForClient = serverEvent.Peer!;
+
+            // ── Send / echo loop ───────────────────────────────────────────────
+            int echosReceived = 0;
+
+            for (int i = 1; i <= MessageCount; i++)
+            {
+                serverEvent.Type = ENetEventType.None;
+                clientEvent.Type = ENetEventType.None;
+
+                // Client sends "Hello #i" reliably on channel 0
+                string text = $"Hello #{i}";
+                byte[] data = Encoding.UTF8.GetBytes(text);
+                var pkt = ENetPacket.Create(data, data.Length, ENetPacketFlag.Reliable);
+                client.PeerSend(clientPeer!, 0, pkt);
+
+                // Wait for server to receive the packet
+                bool serverReceived = RunServiceLoop(client, clientEvent, server, serverEvent,
+                    (c, s) => s.Type == ENetEventType.Receive);
+
+                Assert.True(serverReceived, $"Server did not receive message #{i}");
+                Assert.NotNull(serverEvent.Packet);
+
+                // Server echoes back the exact bytes
+                byte[] echoData = new byte[serverEvent.Packet.DataLength];
+                Array.Copy(serverEvent.Packet.Data, echoData, echoData.Length);
+                var echoPkt = ENetPacket.Create(echoData, echoData.Length, ENetPacketFlag.Reliable);
+                server.PeerSend(serverPeerForClient, (byte)serverEvent.ChannelId, echoPkt);
+
+                // Reset and wait for client to receive the echo
+                serverEvent.Type = ENetEventType.None;
+                clientEvent.Type = ENetEventType.None;
+
+                bool clientReceived = RunServiceLoop(client, clientEvent, server, serverEvent,
+                    (c, s) => c.Type == ENetEventType.Receive);
+
+                Assert.True(clientReceived, $"Client did not receive echo #{i}");
+                Assert.NotNull(clientEvent.Packet);
+
+                string echo = Encoding.UTF8.GetString(
+                    clientEvent.Packet.Data, 0, clientEvent.Packet.DataLength);
+                Assert.Equal(text, echo);
+
+                echosReceived++;
+            }
+
+            Assert.Equal(MessageCount, echosReceived);
+
+            // ── Disconnect ─────────────────────────────────────────────────────
+            serverEvent.Type = ENetEventType.None;
+            clientEvent.Type = ENetEventType.None;
+
+            clientPeer!.Disconnect(0);
+
+            bool disconnected = RunServiceLoop(client, clientEvent, server, serverEvent,
+                (c, s) => s.Type == ENetEventType.Disconnect, maxIterations: 60);
+
+            Assert.True(disconnected, "Server did not receive Disconnect event after echo exchange");
+            Assert.Equal(ENetEventType.Disconnect, serverEvent.Type);
         }
     }
 }

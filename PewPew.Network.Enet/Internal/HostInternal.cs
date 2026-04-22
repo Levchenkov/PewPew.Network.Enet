@@ -808,8 +808,13 @@ namespace PewPew.Network.Enet.Internal
                 case ENetProtocolCommand.Disconnect:
                     if (peer != null)
                     {
-                        if (needsAck) peer.QueueAcknowledgement(ref command, sentTime);
-                        return HandleDisconnect(evt, peer, ref command);
+                        // HandleDisconnect calls ResetQueues(), which would clear any ACK queued before it.
+                        // Call HandleDisconnect first, then queue the ACK only if the peer is now
+                        // in AcknowledgingDisconnect (meaning it expects an ACK to complete the handshake).
+                        int result = HandleDisconnect(evt, peer, ref command);
+                        if (needsAck && peer.State == ENetPeerState.AcknowledgingDisconnect)
+                            peer.QueueAcknowledgement(ref command, sentTime);
+                        return result;
                     }
                     break;
 

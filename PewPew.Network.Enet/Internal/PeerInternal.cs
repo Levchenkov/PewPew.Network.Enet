@@ -470,7 +470,12 @@ namespace PewPew.Network.Enet.Internal
                 }
                 else
                 {
-                    // Reliable: look for duplicate
+                    // Discard reliable commands that have already been processed and dispatched.
+                    // Uses signed 16-bit arithmetic to correctly handle sequence number wrap-around.
+                    if ((short)(reliableSequenceNumber - (ushort)(channel.IncomingReliableSequenceNumber + 1)) < 0)
+                        goto freePacket;
+
+                    // Reliable: look for duplicate in pending (not-yet-dispatched) list
                     for (var cur = channel.IncomingReliableCommands.Begin;
                          cur != channel.IncomingReliableCommands.End;
                          cur = cur.Next!)

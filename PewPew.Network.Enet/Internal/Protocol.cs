@@ -28,7 +28,7 @@ namespace PewPew.Network.Enet.Internal
         public const int HostDefaultMaxWaitingData = 32 * 1024 * 1024;
 
         // Peer defaults
-        public const uint PeerDefaultRoundTripTime = 1;
+        public const uint PeerDefaultRoundTripTime = 500;
         public const uint PeerDefaultPacketThrottle = 32;
         public const uint PeerPacketThrottleThreshold = 40;
         public const uint PeerPacketThrottleScale = 32;
