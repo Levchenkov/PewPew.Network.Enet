@@ -363,8 +363,8 @@ namespace PewPew.Network.Enet.Internal
 
             int fragmentLength = (int)peer.Mtu - CommandSizes.ProtocolHeaderSize - CommandSizes.GetCommandSize(
                 (packet.Flags & ENetPacketFlag.Reliable) != 0
-                    ? (byte)ENetProtocolCommand.SendReliable
-                    : (byte)ENetProtocolCommand.SendUnreliable);
+                    ? (byte)ENetProtocolCommand.SendFragment
+                    : (byte)ENetProtocolCommand.SendUnreliableFragment);
 
             if (fragmentLength < 0) fragmentLength = 1;
 
@@ -734,10 +734,24 @@ namespace PewPew.Network.Enet.Internal
 
                 offset += cmdSize;
 
+                // For data-bearing commands, advance past the inline payload so the
+                // next iteration starts at the next command header, not the payload bytes.
+                int payloadLen = cmdType switch
+                {
+                    ENetProtocolCommand.SendReliable          => protocol.SendReliable.DataLength,
+                    ENetProtocolCommand.SendUnreliable        => protocol.SendUnreliable.DataLength,
+                    ENetProtocolCommand.SendFragment          => protocol.SendFragment.DataLength,
+                    ENetProtocolCommand.SendUnreliableFragment => protocol.SendFragment.DataLength,
+                    ENetProtocolCommand.SendUnsequenced       => protocol.SendUnsequenced.DataLength,
+                    _ => 0
+                };
+                if (payloadLen < 0 || offset + payloadLen > data.Length) break;
+
                 if (peer == null && cmdType != ENetProtocolCommand.Connect)
                     break;
 
-                int result = HandleCommand(evt, peer, ref protocol, sentTime, cmdType, cmdSpan, data.Slice(offset));
+                int result = HandleCommand(evt, peer, ref protocol, sentTime, cmdType, cmdSpan, data.Slice(offset, payloadLen));
+                offset += payloadLen;
                 if (result == 1) return 1;
             }
 
@@ -1402,7 +1416,7 @@ namespace PewPew.Network.Enet.Internal
                 int cmdSize = CommandSizes.GetCommandSize(cmd.Command.Header.Command);
                 int dataLen = cmd.Packet != null ? cmd.FragmentLength : 0;
 
-                if (offset + cmdSize + dataLen > sendBuffer.Length)
+                if (offset + cmdSize + dataLen > peer.Mtu)
                     break;
 
                 // Check window
@@ -1491,7 +1505,7 @@ namespace PewPew.Network.Enet.Internal
                 int cmdSize = CommandSizes.GetCommandSize(cmd.Command.Header.Command);
                 int dataLen = cmd.Packet != null ? cmd.FragmentLength : 0;
 
-                if (offset + cmdSize + dataLen > sendBuffer.Length)
+                if (offset + cmdSize + dataLen > peer.Mtu)
                     break;
 
                 peer.OutgoingCommands.Remove(cmd.ListNode);
